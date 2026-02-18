@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY check_seminars.py .
+COPY check_seminars.py db.py ./
 
 ENV PYTHONUNBUFFERED=1
 
