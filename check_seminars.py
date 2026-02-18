@@ -451,15 +451,17 @@ class SeminarReminderBot(discord.Client):
     async def setup_hook(self) -> None:
         """Called after login, before connection. Run first check and start loop."""
         init_db()
-        # Fun status while starting
+        log.info("Bot ready. Running first check, then every %.0f min.", self._interval_minutes)
+        asyncio.create_task(self._check_loop())
+
+    async def on_ready(self) -> None:
+        """Set initial presence once the WebSocket is connected."""
         await self.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
                 name=f"PXL seminaries • check every {int(self._interval_minutes)}m",
             ),
         )
-        log.info("Bot ready. Running first check, then every %.0f min.", self._interval_minutes)
-        asyncio.create_task(self._check_loop())
 
     async def _check_loop(self) -> None:
         """Run do_check immediately, then every interval_minutes."""
