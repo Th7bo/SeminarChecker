@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 import requests
@@ -149,6 +150,24 @@ def parse_seminar_page(html: str, page_url: str) -> dict | None:
     }
 
 
+def get_seminar_year(seminar: dict) -> int | None:
+    """
+    Extract the seminar's event year from register URL (e.g. ...-2025-02-25-.../register)
+    or from practical text (e.g. "24 maart 2026"). Returns None if unknown.
+    """
+    # Prefer register URL: /event/...-YYYY-MM-DD-.../register
+    url = seminar.get("register_url") or seminar.get("url") or ""
+    m = re.search(r"-(\d{4})-\d{2}-\d{2}-", url)
+    if m:
+        return int(m.group(1))
+    # Fallback: 4-digit year in practical (e.g. "24 maart 2026")
+    practical = seminar.get("practical") or ""
+    m = re.search(r"\b(20\d{2})\b", practical)
+    if m:
+        return int(m.group(1))
+    return None
+
+
 def build_discord_embed(seminar: dict) -> dict:
     """Build a Discord embed payload for one seminar."""
     title = seminar.get("title") or "Seminar"
@@ -241,6 +260,10 @@ def run_check(webhook_url: str | None = None, ping: str | None = None) -> None:
         if not data:
             continue
         if not data.get("register_url"):
+            continue
+        # Only notify for seminars in the current year (skip old events from previous years)
+        seminar_year = get_seminar_year(data)
+        if seminar_year is not None and seminar_year != date.today().year:
             continue
         if send_discord_webhook(webhook_url, data, ping):
             notified.add(sid)
