@@ -40,41 +40,21 @@ Checks the [PXL-Digital seminaries page](https://pxl-digital.pxl.be/i-talent/sem
 
 ## Usage
 
-- **Single run** (e.g. from cron):
-  ```bash
-  python check_seminars.py
-  ```
+The app is a **long-lived Discord bot**: it stays online and runs the seminar check on a schedule (every `CHECK_INTERVAL` minutes, default 60). No cron or external loop needed.
 
-- **Periodic loop** (e.g. every 60 minutes):
-  ```bash
-  python check_seminars.py --loop --interval 60
-  ```
-
-- **Custom interval** (e.g. every 30 minutes):
-  ```bash
-  python check_seminars.py -l -i 30
-  ```
-
-- **More verbose logs** (e.g. why each seminar was skipped):
-  ```bash
-  python check_seminars.py --log-level DEBUG
-  ```
-  Or set `LOG_LEVEL=DEBUG` in the environment.
-
-State is stored in PostgreSQL. The bot also posts a **single status embed** in the same channel (seminaries on list, open for registration, total notified, new this run, next update). That message is **edited in place** on every run, not re-sent. If you use `--loop` or set `CHECK_INTERVAL`, the embed shows the next run time in Discord’s local time format.
-
-## Cron example
-
-Run every hour:
-
-```cron
-0 * * * * cd /path/to/seminar-reminder && .venv/bin/python check_seminars.py
+```bash
+python check_seminars.py
 ```
-Set `DATABASE_URL`, `DISCORD_BOT_TOKEN`, and `DISCORD_CHANNEL_ID` in the cron environment or in a `.env` file loaded by your runner.
+
+All configuration is via environment variables (`DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `DATABASE_URL`, and optionally `DISCORD_PING`, `CHECK_INTERVAL`, `LOG_LEVEL`).
+
+- **More verbose logs**: set `LOG_LEVEL=DEBUG` or run `python check_seminars.py --log-level DEBUG`
+
+The bot posts a **single status embed** in the channel (seminaries on list, open for registration, total notified, new this run, next update). That message is **edited in place** after each check; the embed shows the next run time in Discord’s local time format.
 
 ## Docker
 
-Build and run with Docker (requires a PostgreSQL instance and `DATABASE_URL`):
+Build and run with Docker (requires a PostgreSQL instance and `DATABASE_URL`). The container runs the bot; it stays online and performs checks every `CHECK_INTERVAL` minutes.
 
 ```bash
 docker build -t seminar-reminder .
@@ -109,7 +89,7 @@ The app will create the `notified_seminars` table on first run. Data is stored i
 2. For each seminar page, fetches the HTML and looks for the **Inschrijven** link.
 3. If its `href` is not `#` (and not empty), registration is considered open. Only seminars in the **current year** are considered (older events are ignored).
 4. For each such seminar that is not yet in the `notified_seminars` table, the script sends one Discord message with an embed (title, company, date/time/location, and link to register), then inserts a row into the database.
-5. A **status embed** in the same channel is created once, then **edited** each run with global stats and (when running in a loop or with `CHECK_INTERVAL`) the next update time in Discord time format.
+5. A **status embed** in the same channel is created once, then **edited** after each check with global stats and the next update time in Discord time format.
 
 ## Database
 

@@ -220,55 +220,15 @@ def _embed_dict_to_discord(embed_dict: dict) -> discord.Embed:
     return e
 
 
-async def _send_discord_message_async(
-    bot_token: str,
-    channel_id: int,
-    seminar: dict,
-    ping: str,
-) -> None:
-    """Send one message via discord.py (async). Raises on failure."""
-    intents = discord.Intents.none()
-    client = discord.Client(intents=intents)
-
-    @client.event
-    async def on_ready() -> None:
-        try:
-            channel = await client.fetch_channel(channel_id)
-            if channel is None:
-                raise ValueError(f"Channel {channel_id} not found")
-            embed_dict = build_discord_embed(seminar)
-            embed = _embed_dict_to_discord(embed_dict)
-            content = ping.strip() if ping and ping.strip() else None
-            await channel.send(content=content, embed=embed)
-        finally:
-            await client.close()
-
-    async with client:
-        await client.start(bot_token)
-
-
-def send_discord_message(
-    bot_token: str,
-    channel_id: str,
-    seminar: dict,
-    ping: str = "@everyone",
-) -> bool:
-    """Send one Discord message (as bot) to the given channel with embed. Returns True on success."""
+async def _send_seminar_embed_async(channel: discord.abc.Messageable, seminar: dict, ping: str) -> bool:
+    """Send one seminar notification. Returns True on success."""
     try:
-        asyncio.run(
-            _send_discord_message_async(
-                bot_token,
-                int(channel_id),
-                seminar,
-                ping or "",
-            )
-        )
+        embed = _embed_dict_to_discord(build_discord_embed(seminar))
+        content = ping.strip() if ping and ping.strip() else None
+        await channel.send(content=content, embed=embed)
         return True
     except discord.DiscordException as e:
         log.warning("Discord error: %s", e)
-        return False
-    except Exception as e:
-        log.warning("Discord send failed: %s", e)
         return False
 
 
@@ -323,81 +283,42 @@ def build_status_embed(
     return e
 
 
-async def _update_status_message_async(
-    bot_token: str,
+async def _update_status_with_bot(
+    bot: discord.Client,
     channel_id: int,
     embed: discord.Embed,
 ) -> None:
-    """Create or edit the single status message. Uses stored message ID to edit in place."""
+    """Create or edit the status message using the running bot."""
+    channel = await bot.fetch_channel(channel_id)
+    if channel is None:
+        raise ValueError(f"Channel {channel_id} not found")
     stored_id = get_status_message_id()
-    intents = discord.Intents.none()
-    client = discord.Client(intents=intents)
-
-    @client.event
-    async def on_ready() -> None:
+    if stored_id:
         try:
-            channel = await client.fetch_channel(channel_id)
-            if channel is None:
-                raise ValueError(f"Channel {channel_id} not found")
-            if stored_id:
-                try:
-                    message = await channel.fetch_message(int(stored_id))
-                    await message.edit(embed=embed, content=None)
-                    log.debug("Edited status message %s", stored_id)
-                except discord.NotFound:
-                    msg = await channel.send(embed=embed)
-                    set_status_message_id(str(msg.id))
-                    log.info("Status message was deleted; recreated as %s", msg.id)
-            else:
-                msg = await channel.send(embed=embed)
-                set_status_message_id(str(msg.id))
-                log.debug("Created status message %s", msg.id)
-        finally:
-            await client.close()
-
-    async with client:
-        await client.start(bot_token)
+            message = await channel.fetch_message(int(stored_id))
+            await message.edit(embed=embed, content=None)
+            log.debug("Edited status message %s", stored_id)
+        except discord.NotFound:
+            msg = await channel.send(embed=embed)
+            set_status_message_id(str(msg.id))
+            log.info("Status message was deleted; recreated as %s", msg.id)
+    else:
+        msg = await channel.send(embed=embed)
+        set_status_message_id(str(msg.id))
+        log.debug("Created status message %s", msg.id)
 
 
-def update_status_message(
-    bot_token: str,
-    channel_id: str,
-    embed: discord.Embed,
-) -> bool:
-    """Create or edit the status embed message. Returns True on success."""
-    try:
-        asyncio.run(_update_status_message_async(bot_token, int(channel_id), embed))
-        return True
-    except discord.DiscordException as e:
-        log.warning("Discord status update error: %s", e)
-        return False
-    except Exception as e:
-        log.warning("Status message update failed: %s", e)
-        return False
-
-
-def run_check(
-    bot_token: str | None = None,
-    channel_id: str | None = None,
-    ping: str | None = None,
-    interval_minutes: float | None = None,
-) -> None:
-    """Fetch seminar list, check each detail page for open registration, notify once per seminar."""
-    bot_token = bot_token or os.environ.get("DISCORD_BOT_TOKEN")
-    channel_id = channel_id or os.environ.get("DISCORD_CHANNEL_ID")
-    if not bot_token:
-        log.error("Set DISCORD_BOT_TOKEN or pass --bot-token")
-        sys.exit(1)
-    if not channel_id:
-        log.error("Set DISCORD_CHANNEL_ID or pass --channel")
-        sys.exit(1)
-    ping = (ping if ping is not None else os.environ.get("DISCORD_PING", "@everyone")) or ""
-
-    log.info("Starting seminar check (list=%s)", SEMINARIES_LIST_URL)
+def run_check_compute(
+    interval_minutes: float,
+) -> tuple[list[tuple[str, str, dict]], int, int]:
+    """
+    Sync: fetch list, parse seminars, return (to_notify, open_count, seminaries_on_list).
+    to_notify = [(sid, url, data), ...] for open + not yet notified. No Discord I/O.
+    """
     init_db()
     notified = get_notified_seminar_ids()
     current_year = date.today().year
-    log.info("Current year=%d, already notified=%d seminar(s)", current_year, len(notified))
+    log.info("Seminar check: year=%d, already notified=%d", current_year, len(notified))
 
     try:
         r = requests.get(
@@ -408,106 +329,178 @@ def run_check(
         r.raise_for_status()
     except requests.RequestException as e:
         log.error("Failed to fetch seminar list: %s", e)
-        sys.exit(1)
+        return [], 0, 0
 
     seminar_urls = get_seminar_links_from_list_page(r.text)
     log.info("Fetched list page, found %d seminar link(s)", len(seminar_urls))
+    if not seminar_urls:
+        return [], 0, 0
 
+    to_notify: list[tuple[str, str, dict]] = []
     open_count = 0
-    new_notifications = 0
     for url in seminar_urls:
         sid = normalize_seminar_id(url)
         log.debug("Checking seminar: %s", url)
         html = fetch_seminar_page(url)
         if not html:
-            log.debug("Skip (fetch failed): %s", url)
             continue
         data = parse_seminar_page(html, url)
-        if not data:
-            log.debug("Skip (parse failed): %s", url)
-            continue
-        if not data.get("register_url"):
-            log.debug("Skip (registration not open): %s", data.get("title", url))
+        if not data or not data.get("register_url"):
             continue
         seminar_year = get_seminar_year(data)
         if seminar_year is not None and seminar_year != current_year:
-            log.debug("Skip (year %s != %s): %s", seminar_year, current_year, data.get("title", url))
             continue
         open_count += 1
         if sid in notified:
-            log.debug("Skip (already notified): %s", url)
             continue
+        to_notify.append((sid, url, data))
+
+    return to_notify, open_count, len(seminar_urls)
+
+
+async def do_check(
+    bot: discord.Client,
+    channel_id: int,
+    ping: str,
+    interval_minutes: float,
+) -> None:
+    """Run one seminar check using the running bot (send + status update)."""
+    loop = asyncio.get_event_loop()
+    to_notify, open_count, seminaries_on_list = await loop.run_in_executor(
+        None,
+        lambda: run_check_compute(interval_minutes),
+    )
+
+    channel = await bot.fetch_channel(channel_id)
+    if channel is None:
+        log.error("Channel %s not found", channel_id)
+        return
+
+    new_notifications = 0
+    for sid, url, data in to_notify:
         log.info("Sending notification: %s", data.get("title", url))
-        if send_discord_message(bot_token, channel_id, data, ping):
+        if await _send_seminar_embed_async(channel, data, ping):
             mark_notified(sid, seminar_url=url, title=data.get("title"))
-            notified.add(sid)
             new_notifications += 1
             log.info("Notified: %s", data.get("title", url))
         else:
             log.warning("Discord send failed for: %s", data.get("title", url))
 
     total = get_notified_count()
-    log.info("Done. Notified %d new seminar(s) this run. State has %d total.", new_notifications, total)
+    log.info("Done. Notified %d new this run. Total %d.", new_notifications, total)
 
-    # Update the single global status embed (create once, then edit in place)
     last_check = datetime.now(timezone.utc)
-    next_update_utc = (
-        last_check + timedelta(minutes=max(1, interval_minutes))
-        if interval_minutes is not None
-        else None
-    )
+    next_update_utc = last_check + timedelta(minutes=max(1, interval_minutes))
     status_embed = build_status_embed(
-        seminaries_on_list=len(seminar_urls),
+        seminaries_on_list=seminaries_on_list,
         open_for_registration=open_count,
         total_notified=total,
         new_this_run=new_notifications,
         last_check=last_check,
         next_update_utc=next_update_utc,
     )
-    if update_status_message(bot_token, channel_id, status_embed):
-        log.debug("Status embed updated")
+    try:
+        await _update_status_with_bot(bot, channel_id, status_embed)
+    except Exception as e:
+        log.warning("Status embed update failed: %s", e)
+
+    # Update bot presence with current stats (fun status)
+    await _set_bot_presence(bot, open_count, total, interval_minutes)
+
+
+def _format_bot_activity(open_count: int, total_notified: int, interval_minutes: float) -> str:
+    """Short, fun status line for the bot (max 128 chars for Discord)."""
+    parts = []
+    if open_count == 0:
+        parts.append("no open seminars")
+    elif open_count == 1:
+        parts.append("1 open seminar")
     else:
-        log.warning("Failed to update status embed")
+        parts.append(f"{open_count} open seminars")
+    parts.append(f"{total_notified} notified")
+    if interval_minutes >= 1:
+        parts.append(f"every {int(interval_minutes)}m")
+    return " • ".join(parts)[:128]
+
+
+async def _set_bot_presence(
+    bot: discord.Client,
+    open_count: int,
+    total_notified: int,
+    interval_minutes: float,
+) -> None:
+    """Set the bot's visible activity (status) with current stats."""
+    try:
+        name = _format_bot_activity(open_count, total_notified, interval_minutes)
+        activity = discord.Activity(type=discord.ActivityType.watching, name=name)
+        await bot.change_presence(activity=activity)
+        log.debug("Presence set: %s", name)
+    except Exception as e:
+        log.debug("Could not set presence: %s", e)
+
+
+class SeminarReminderBot(discord.Client):
+    """Long-lived bot that runs the seminar check on a schedule."""
+
+    def __init__(self, *, channel_id: int, ping: str, interval_minutes: float, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._channel_id = channel_id
+        self._ping = ping
+        self._interval_minutes = max(1.0, interval_minutes)
+
+    async def setup_hook(self) -> None:
+        """Called after login, before connection. Run first check and start loop."""
+        init_db()
+        # Fun status while starting
+        await self.change_presence(
+            activity=discord.Activity(
+                type=discord.ActivityType.watching,
+                name=f"PXL seminaries • check every {int(self._interval_minutes)}m",
+            ),
+        )
+        log.info("Bot ready. Running first check, then every %.0f min.", self._interval_minutes)
+        asyncio.create_task(self._check_loop())
+
+    async def _check_loop(self) -> None:
+        """Run do_check immediately, then every interval_minutes."""
+        while True:
+            try:
+                await do_check(self, self._channel_id, self._ping, self._interval_minutes)
+            except Exception as e:
+                log.exception("Check failed: %s", e)
+            await asyncio.sleep(max(60, self._interval_minutes * 60))
 
 
 def main() -> None:
     import argparse
-    parser = argparse.ArgumentParser(description="Check PXL seminars and notify Discord (as a bot) when registration opens.")
-    parser.add_argument("--bot-token", "-t", default=os.environ.get("DISCORD_BOT_TOKEN"), help="Discord bot token (or set DISCORD_BOT_TOKEN)")
-    parser.add_argument("--channel", "-c", default=os.environ.get("DISCORD_CHANNEL_ID"), help="Discord channel ID to post to (or set DISCORD_CHANNEL_ID)")
-    parser.add_argument("--ping", "-p", default=os.environ.get("DISCORD_PING", "@everyone"), help="Mention to ping (e.g. @everyone, @here, or <@&role_id>). Default: @everyone. Set empty to disable.")
-    parser.add_argument("--loop", "-l", action="store_true", help="Run indefinitely, re-check every N minutes")
-    parser.add_argument("--interval", "-i", type=float, default=60, help="Minutes between checks when using --loop (default: 60)")
-    parser.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"), choices=("DEBUG", "INFO", "WARNING", "ERROR"), help="Logging level (default: INFO, or env LOG_LEVEL)")
+    parser = argparse.ArgumentParser(description="PXL Seminar Reminder – Discord bot that checks seminars on a schedule.")
+    parser.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"), choices=("DEBUG", "INFO", "WARNING", "ERROR"), help="Log level")
     args = parser.parse_args()
     setup_logging(args.log_level)
-    if not args.bot_token:
-        log.error("Set DISCORD_BOT_TOKEN or pass --bot-token")
+
+    token = os.environ.get("DISCORD_BOT_TOKEN")
+    channel_id_raw = os.environ.get("DISCORD_CHANNEL_ID")
+    if not token:
+        log.error("DISCORD_BOT_TOKEN is not set")
         sys.exit(1)
-    if not args.channel:
-        log.error("Set DISCORD_CHANNEL_ID or pass --channel")
+    if not channel_id_raw:
+        log.error("DISCORD_CHANNEL_ID is not set")
         sys.exit(1)
     if not os.environ.get("DATABASE_URL"):
-        log.error("DATABASE_URL is not set (required for PostgreSQL)")
+        log.error("DATABASE_URL is not set")
         sys.exit(1)
-    if args.loop:
-        import time
-        while True:
-            run_check(
-                bot_token=args.bot_token,
-                channel_id=args.channel,
-                ping=args.ping,
-                interval_minutes=args.interval,
-            )
-            time.sleep(max(60, args.interval * 60))
-    else:
-        interval = os.environ.get("CHECK_INTERVAL")
-        run_check(
-            bot_token=args.bot_token,
-            channel_id=args.channel,
-            ping=args.ping,
-            interval_minutes=float(interval) if interval else None,
-        )
+
+    ping = (os.environ.get("DISCORD_PING") or "@everyone").strip() or ""
+    interval = float(os.environ.get("CHECK_INTERVAL", "60"))
+
+    intents = discord.Intents.none()
+    bot = SeminarReminderBot(
+        channel_id=int(channel_id_raw),
+        ping=ping,
+        interval_minutes=interval,
+        intents=intents,
+    )
+    bot.run(token)
 
 
 if __name__ == "__main__":
