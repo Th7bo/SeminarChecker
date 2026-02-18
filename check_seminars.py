@@ -6,6 +6,7 @@ Only one notification per seminar is sent.
 """
 
 import json
+import logging
 import os
 import re
 import sys
@@ -20,15 +21,33 @@ SEMINARIES_LIST_URL = f"{BASE_URL}/i-talent/seminaries-2tin-25-26"
 STATE_FILE = Path(__file__).resolve().parent / "notified_seminars.json"
 USER_AGENT = "PXL-Seminar-Reminder/1.0"
 
+log = logging.getLogger("seminar_reminder")
+
+
+def setup_logging(level: str = None) -> None:
+    """Configure logging. Level from env LOG_LEVEL or argument (default: INFO)."""
+    lvl = (level or os.environ.get("LOG_LEVEL", "INFO")).upper()
+    logging.basicConfig(
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        level=getattr(logging, lvl, logging.INFO),
+        stream=sys.stdout,
+    )
+    log.setLevel(getattr(logging, lvl, logging.INFO))
+
 
 def load_notified() -> set[str]:
     """Load set of seminar IDs we have already notified."""
     if not STATE_FILE.exists():
+        log.debug("No state file at %s, starting with empty notified set", STATE_FILE)
         return set()
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        return set(data.get("notified", []))
-    except (json.JSONDecodeError, OSError):
+        notified = set(data.get("notified", []))
+        log.debug("Loaded %d notified seminar(s) from %s", len(notified), STATE_FILE)
+        return notified
+    except (json.JSONDecodeError, OSError) as e:
+        log.warning("Could not load state file %s: %s", STATE_FILE, e)
         return set()
 
 
@@ -38,6 +57,7 @@ def save_notified(notified: set[str]) -> None:
         json.dumps({"notified": sorted(notified)}, indent=2),
         encoding="utf-8",
     )
+    log.debug("Saved %d notified seminar(s) to %s", len(notified), STATE_FILE)
 
 
 def get_seminar_links_from_list_page(html: str) -> list[str]:
@@ -76,7 +96,8 @@ def fetch_seminar_page(url: str) -> str | None:
         )
         r.raise_for_status()
         return r.text
-    except requests.RequestException:
+    except requests.RequestException as e:
+        log.debug("Fetch failed for %s: %s", url, e)
         return None
 
 
@@ -215,10 +236,10 @@ def send_discord_webhook(webhook_url: str, seminar: dict, ping: str = "@everyone
         )
         if r.status_code in (200, 204):
             return True
-        print(f"Discord webhook error: {r.status_code} {r.text}", file=sys.stderr)
+        log.warning("Discord webhook error: %s %s", r.status_code, r.text)
         return False
     except requests.RequestException as e:
-        print(f"Discord webhook request failed: {e}", file=sys.stderr)
+        log.warning("Discord webhook request failed: %s", e)
         return False
 
 
@@ -226,11 +247,14 @@ def run_check(webhook_url: str | None = None, ping: str | None = None) -> None:
     """Fetch seminar list, check each detail page for open registration, notify once per seminar."""
     webhook_url = webhook_url or os.environ.get("DISCORD_WEBHOOK_URL")
     if not webhook_url:
-        print("Set DISCORD_WEBHOOK_URL or pass webhook_url to run_check().", file=sys.stderr)
+        log.error("Set DISCORD_WEBHOOK_URL or pass --webhook URL")
         sys.exit(1)
     ping = (ping if ping is not None else os.environ.get("DISCORD_PING", "@everyone")) or ""
 
+    log.info("Starting seminar check (list=%s)", SEMINARIES_LIST_URL)
     notified = load_notified()
+    current_year = date.today().year
+    log.info("Current year=%d, already notified=%d seminar(s)", current_year, len(notified))
 
     try:
         r = requests.get(
@@ -240,39 +264,47 @@ def run_check(webhook_url: str | None = None, ping: str | None = None) -> None:
         )
         r.raise_for_status()
     except requests.RequestException as e:
-        print(f"Failed to fetch seminar list: {e}", file=sys.stderr)
+        log.error("Failed to fetch seminar list: %s", e)
         sys.exit(1)
 
     seminar_urls = get_seminar_links_from_list_page(r.text)
+    log.info("Fetched list page, found %d seminar link(s)", len(seminar_urls))
     if not seminar_urls:
-        print("No seminar links found on list page.")
         return
 
     new_notifications = 0
     for url in seminar_urls:
         sid = normalize_seminar_id(url)
+        log.debug("Checking seminar: %s", url)
         if sid in notified:
+            log.debug("Skip (already notified): %s", url)
             continue
         html = fetch_seminar_page(url)
         if not html:
+            log.debug("Skip (fetch failed): %s", url)
             continue
         data = parse_seminar_page(html, url)
         if not data:
+            log.debug("Skip (parse failed): %s", url)
             continue
         if not data.get("register_url"):
+            log.debug("Skip (registration not open): %s", data.get("title", url))
             continue
-        # Only notify for seminars in the current year (skip old events from previous years)
         seminar_year = get_seminar_year(data)
-        if seminar_year is not None and seminar_year != date.today().year:
+        if seminar_year is not None and seminar_year != current_year:
+            log.debug("Skip (year %s != %s): %s", seminar_year, current_year, data.get("title", url))
             continue
+        log.info("Sending notification: %s", data.get("title", url))
         if send_discord_webhook(webhook_url, data, ping):
             notified.add(sid)
             new_notifications += 1
-            print(f"Notified: {data.get('title', url)}")
+            log.info("Notified: %s", data.get("title", url))
+        else:
+            log.warning("Webhook send failed for: %s", data.get("title", url))
 
     if new_notifications:
         save_notified(notified)
-    print(f"Done. Notified {new_notifications} new seminar(s).")
+    log.info("Done. Notified %d new seminar(s) this run. State has %d total.", new_notifications, len(notified))
 
 
 def main() -> None:
@@ -282,9 +314,11 @@ def main() -> None:
     parser.add_argument("--ping", "-p", default=os.environ.get("DISCORD_PING", "@everyone"), help="Mention to ping (e.g. @everyone, @here, or <@&role_id>). Default: @everyone. Set empty to disable.")
     parser.add_argument("--loop", "-l", action="store_true", help="Run indefinitely, re-check every N minutes")
     parser.add_argument("--interval", "-i", type=float, default=60, help="Minutes between checks when using --loop (default: 60)")
+    parser.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"), choices=("DEBUG", "INFO", "WARNING", "ERROR"), help="Logging level (default: INFO, or env LOG_LEVEL)")
     args = parser.parse_args()
+    setup_logging(args.log_level)
     if not args.webhook:
-        print("Error: set DISCORD_WEBHOOK_URL or pass --webhook URL", file=sys.stderr)
+        log.error("Set DISCORD_WEBHOOK_URL or pass --webhook URL")
         sys.exit(1)
     if args.loop:
         import time

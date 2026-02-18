@@ -49,6 +49,12 @@ Checks the [PXL-Digital seminaries page](https://pxl-digital.pxl.be/i-talent/sem
   python check_seminars.py -l -i 30
   ```
 
+- **More verbose logs** (e.g. why each seminar was skipped):
+  ```bash
+  python check_seminars.py --log-level DEBUG
+  ```
+  Or set `LOG_LEVEL=DEBUG` in the environment.
+
 State is stored in `notified_seminars.json` in the project directory so each seminar is only reported once across runs.
 
 ## Cron example
