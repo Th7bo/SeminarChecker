@@ -1,6 +1,6 @@
 # PXL Seminar Reminder
 
-Checks the [PXL-Digital seminaries page](https://pxl-digital.pxl.be/i-talent/seminaries-2tin-25-26) periodically and sends a **Discord webhook** when a seminar’s **Inschrijven** (register) link is no longer `#` (i.e. registration has opened). Each seminar is notified **only once**.
+Checks the [PXL-Digital seminaries page](https://pxl-digital.pxl.be/i-talent/seminaries-2tin-25-26) periodically and sends a **Discord message (as a bot)** when a seminar’s **Inschrijven** (register) link is no longer `#` (i.e. registration has opened). Each seminar is notified **only once**.
 
 ## Setup
 
@@ -12,21 +12,27 @@ Checks the [PXL-Digital seminaries page](https://pxl-digital.pxl.be/i-talent/sem
    pip install -r requirements.txt
    ```
 
-2. **Discord webhook**
-   - In your Discord server: Channel → Edit channel → Integrations → Webhooks → New webhook.
-   - Copy the webhook URL.
+2. **Discord bot**
+   - Go to [Discord Developer Portal](https://discord.com/developers/applications) → New Application → name it (e.g. “PXL Seminar Reminder”).
+   - In the app: **Bot** → Add Bot → copy the **Token** (this is `DISCORD_BOT_TOKEN`). Reset the token if you ever expose it.
+   - **OAuth2 → URL Generator**: Scopes = `bot`; Bot Permissions = **Send Messages**, **Embed Links**, and (if you use @everyone) **Mention Everyone**. Copy the generated URL, open it in a browser, and invite the bot to your server.
+   - In Discord: enable **Developer Mode** (User Settings → App Settings → Advanced). Right‑click the channel where the bot should post → **Copy Channel ID**. This is `DISCORD_CHANNEL_ID`.
 
-3. **Configure the webhook**
-   - Either set the environment variable:
+3. **Configure the bot**
+   - Set environment variables:
      ```bash
-     export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+     export DISCORD_BOT_TOKEN="your_bot_token"
+     export DISCORD_CHANNEL_ID="1234567890123456789"
      ```
-   - Or pass it when running:
-     ```bash
-     python check_seminars.py --webhook "https://discord.com/api/webhooks/..."
-     ```
+   - Or pass when running: `--bot-token` and `--channel` (see Usage).
 
-4. **Ping** (optional): Notifications include a mention so people get alerted. Default is `@everyone`. Set `DISCORD_PING` or use `--ping`:
+4. **PostgreSQL database** (required): Notified seminars are stored in PostgreSQL so each is only notified once. Set `DATABASE_URL`:
+   ```bash
+   export DATABASE_URL="postgresql://user:password@host:5432/dbname"
+   ```
+   The app creates the `notified_seminars` table automatically on first run. See [Docker Compose](#docker-compose) for a one-command Postgres + app setup.
+
+5. **Ping** (optional): Notifications include a mention so people get alerted. Default is `@everyone`. Set `DISCORD_PING` or use `--ping`:
    - `@everyone` – ping all members (default)
    - `@here` – ping only online members
    - `<@&ROLE_ID>` – ping a specific role (use the role’s ID)
@@ -55,7 +61,7 @@ Checks the [PXL-Digital seminaries page](https://pxl-digital.pxl.be/i-talent/sem
   ```
   Or set `LOG_LEVEL=DEBUG` in the environment.
 
-State is stored in `notified_seminars.json` in the project directory so each seminar is only reported once across runs.
+State is stored in PostgreSQL. The bot also posts a **single status embed** in the same channel (seminaries on list, open for registration, total notified, new this run, next update). That message is **edited in place** on every run, not re-sent. If you use `--loop` or set `CHECK_INTERVAL`, the embed shows the next run time in Discord’s local time format.
 
 ## Cron example
 
@@ -64,44 +70,56 @@ Run every hour:
 ```cron
 0 * * * * cd /path/to/seminar-reminder && .venv/bin/python check_seminars.py
 ```
+Set `DATABASE_URL`, `DISCORD_BOT_TOKEN`, and `DISCORD_CHANNEL_ID` in the cron environment or in a `.env` file loaded by your runner.
 
 ## Docker
 
-Build and run with Docker for easy hosting (runs in a loop, default every 60 minutes):
+Build and run with Docker (requires a PostgreSQL instance and `DATABASE_URL`):
 
 ```bash
 docker build -t seminar-reminder .
 docker run -d --restart unless-stopped \
-  -e DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..." \
+  -e DATABASE_URL="postgresql://user:password@host:5432/dbname" \
+  -e DISCORD_BOT_TOKEN="your_bot_token" \
+  -e DISCORD_CHANNEL_ID="1234567890123456789" \
   -e DISCORD_PING="@everyone" \
   --name seminar-reminder \
   seminar-reminder
 ```
 
-- **Persist state** across container restarts (so you don’t get duplicate notifications):
-  ```bash
-  docker run -d --restart unless-stopped \
-    -e DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..." \
-    -e DISCORD_PING="@everyone" \
-    -v seminar-reminder-state:/app \
-    --name seminar-reminder \
-    seminar-reminder
-  ```
+- **Check more often** (e.g. every 30 minutes): add `-e CHECK_INTERVAL=30`
 
-- **Check more often** (e.g. every 30 minutes):
-  ```bash
-  docker run -d ... -e CHECK_INTERVAL=30 seminar-reminder
-  ```
+### Docker Compose
+
+Run the app and PostgreSQL together (state persisted in a Postgres volume):
+
+```bash
+# Copy env example and set your bot token and channel ID
+cp .env.example .env
+# Edit .env: set DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID (and optionally DISCORD_PING, CHECK_INTERVAL, LOG_LEVEL)
+
+docker compose up -d
+```
+
+The app will create the `notified_seminars` table on first run. Data is stored in the `pgdata` volume.
 
 ## How it works
 
 1. Fetches the main seminaries list page and collects every “meer info” link (seminar detail URLs).
 2. For each seminar page, fetches the HTML and looks for the **Inschrijven** link.
-3. If its `href` is not `#` (and not empty), registration is considered open.
-4. For each such seminar that is not yet in `notified_seminars.json`, the script sends one Discord message with an embed (title, company, date/time/location, and link to register), then adds that seminar to the state file.
+3. If its `href` is not `#` (and not empty), registration is considered open. Only seminars in the **current year** are considered (older events are ignored).
+4. For each such seminar that is not yet in the `notified_seminars` table, the script sends one Discord message with an embed (title, company, date/time/location, and link to register), then inserts a row into the database.
+5. A **status embed** in the same channel is created once, then **edited** each run with global stats and (when running in a loop or with `CHECK_INTERVAL`) the next update time in Discord time format.
+
+## Database
+
+- **`notified_seminars`**: `seminar_id` (PK), `seminar_url`, `title`, `notified_at`. Tracks which seminars have already been announced.
+- **`bot_state`**: key/value store used e.g. for the status embed message ID (so it can be edited in place).
+
+The schema is created automatically on first run. You can add more tables or columns later for extra features.
 
 ## Optional ideas
 
-- **Multiple webhooks**: Duplicate the script or add a second env var (e.g. `DISCORD_WEBHOOK_URL_2`) and call the webhook twice for each new seminar.
+- **Multiple channels**: Call the Discord API for each channel (add `DISCORD_CHANNEL_ID_2`, etc.) to post the same notification in several channels.
 - **Filter by track**: If you only want e.g. AON/SWM seminars, you could filter in `get_seminar_links_from_list_page` or after parsing the detail page using the “Specialisatie” field.
-- **Resetting state**: Delete `notified_seminars.json` to trigger new notifications for all currently open seminars (e.g. for testing or a new semester).
+- **Resetting state**: `DELETE FROM notified_seminars;` (or drop and recreate the table) to trigger new notifications for all currently open seminars (e.g. for testing or a new semester).

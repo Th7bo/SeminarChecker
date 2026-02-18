@@ -3,5 +3,3 @@ venv/
 __pycache__/
 *.pyc
 .env
-# Optional: uncomment to avoid committing notified state
-# notified_seminars.json
