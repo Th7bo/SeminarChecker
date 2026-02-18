@@ -181,13 +181,16 @@ def build_discord_embed(seminar: dict) -> dict:
     return embed
 
 
-def send_discord_webhook(webhook_url: str, seminar: dict) -> bool:
+def send_discord_webhook(webhook_url: str, seminar: dict, ping: str = "@everyone") -> bool:
     """Send one Discord webhook message with embed. Returns True on success."""
     embed = build_discord_embed(seminar)
+    payload = {"embeds": [embed]}
+    if ping and ping.strip():
+        payload["content"] = ping.strip()
     try:
         r = requests.post(
             webhook_url,
-            json={"embeds": [embed]},
+            json=payload,
             headers={"Content-Type": "application/json"},
             timeout=10,
         )
@@ -200,12 +203,13 @@ def send_discord_webhook(webhook_url: str, seminar: dict) -> bool:
         return False
 
 
-def run_check(webhook_url: str | None = None) -> None:
+def run_check(webhook_url: str | None = None, ping: str | None = None) -> None:
     """Fetch seminar list, check each detail page for open registration, notify once per seminar."""
     webhook_url = webhook_url or os.environ.get("DISCORD_WEBHOOK_URL")
     if not webhook_url:
         print("Set DISCORD_WEBHOOK_URL or pass webhook_url to run_check().", file=sys.stderr)
         sys.exit(1)
+    ping = (ping if ping is not None else os.environ.get("DISCORD_PING", "@everyone")) or ""
 
     notified = load_notified()
 
@@ -238,7 +242,7 @@ def run_check(webhook_url: str | None = None) -> None:
             continue
         if not data.get("register_url"):
             continue
-        if send_discord_webhook(webhook_url, data):
+        if send_discord_webhook(webhook_url, data, ping):
             notified.add(sid)
             new_notifications += 1
             print(f"Notified: {data.get('title', url)}")
@@ -252,6 +256,7 @@ def main() -> None:
     import argparse
     parser = argparse.ArgumentParser(description="Check PXL seminars and notify Discord when registration opens.")
     parser.add_argument("--webhook", "-w", default=os.environ.get("DISCORD_WEBHOOK_URL"), help="Discord webhook URL (or set DISCORD_WEBHOOK_URL)")
+    parser.add_argument("--ping", "-p", default=os.environ.get("DISCORD_PING", "@everyone"), help="Mention to ping (e.g. @everyone, @here, or <@&role_id>). Default: @everyone. Set empty to disable.")
     parser.add_argument("--loop", "-l", action="store_true", help="Run indefinitely, re-check every N minutes")
     parser.add_argument("--interval", "-i", type=float, default=60, help="Minutes between checks when using --loop (default: 60)")
     args = parser.parse_args()
@@ -261,10 +266,10 @@ def main() -> None:
     if args.loop:
         import time
         while True:
-            run_check(args.webhook)
+            run_check(args.webhook, ping=args.ping)
             time.sleep(max(60, args.interval * 60))
     else:
-        run_check(args.webhook)
+        run_check(args.webhook, ping=args.ping)
 
 
 if __name__ == "__main__":

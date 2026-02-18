@@ -26,6 +26,12 @@ Checks the [PXL-Digital seminaries page](https://pxl-digital.pxl.be/i-talent/sem
      python check_seminars.py --webhook "https://discord.com/api/webhooks/..."
      ```
 
+4. **Ping** (optional): Notifications include a mention so people get alerted. Default is `@everyone`. Set `DISCORD_PING` or use `--ping`:
+   - `@everyone` – ping all members (default)
+   - `@here` – ping only online members
+   - `<@&ROLE_ID>` – ping a specific role (use the role’s ID)
+   - Empty string – no mention
+
 ## Usage
 
 - **Single run** (e.g. from cron):
@@ -61,6 +67,7 @@ Build and run with Docker for easy hosting (runs in a loop, default every 60 min
 docker build -t seminar-reminder .
 docker run -d --restart unless-stopped \
   -e DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..." \
+  -e DISCORD_PING="@everyone" \
   --name seminar-reminder \
   seminar-reminder
 ```
@@ -69,6 +76,7 @@ docker run -d --restart unless-stopped \
   ```bash
   docker run -d --restart unless-stopped \
     -e DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..." \
+    -e DISCORD_PING="@everyone" \
     -v seminar-reminder-state:/app \
     --name seminar-reminder \
     seminar-reminder
