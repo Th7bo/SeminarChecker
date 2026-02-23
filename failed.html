@@ -1,0 +1,61 @@
+<html>
+    <head>
+        <title>PXL - De hogeschool met het netwerk - Webapplicatie niet beschikbaar</title>
+        <meta http-equiv="refresh" content="60">
+
+        <!-- Styles -->
+        <link href="https://wcf.pxl.be/Styles/PXL.css" rel="stylesheet" />
+
+        <!-- Scripts -->
+        <script src="https://wcf.pxl.be/Scripts/jquery-1.9.1.min.js" type="text/javascript"></script>
+        <script type="text/javascript">
+            $(document).ready(function(){
+                var url = location.href;
+                url = url.replace('http://', '');
+                url = url.replace('https://', '');
+                var parts = url.split('/');
+                $('#contentHeader').html(parts[0]);
+
+                var links = $('[maillink]');
+                links.each(function(){
+                    $(this).attr("href", "mailto:support@pxl.be?subject=" + parts[0]);
+                });
+            })
+        </script>
+    </head>
+    <body>
+        <div id="menuBalk"></div>
+
+        <div id="divContainer" class="container">
+            <div id="headerLogo" class="headerLogo">
+                <a href="http://www.pxl.be" target="_blank">
+                    <img src="https://wcf.pxl.be/Images/Logo_witte_rand.png" alt="Hogeschool PXL" style="border:none;" border="0" />
+                </a>
+            </div>
+            <div id="subMenuBalk"></div>
+            <div id="contentHeaderBalk"></div>
+            <div id="menu" class="menu">
+
+            </div>
+            <div id="subMenu" class="subMenu">
+            </div>
+            <div id="contentHeader" class="contentHeader">
+            </div>
+            <div id="content">
+                <h2 style="border-bottom:1px solid #58A618;">Webapplicatie niet beschikbaar</h2>
+                Deze webapplicatie is niet beschikbaar vanaf dit netwerk.<br />
+                                Deze poging werd gelogd.<br /><br />
+                                Voor verdere informatie kan u steeds een e-mail sturen naar <a maillink href="mailto:support@pxl.be">support@pxl.be</a>.<br /><br />
+                                <a weblink href="http://www.pxl.be">Website PXL</a><br />
+                                <br /><br />
+                                <h2 style="border-bottom:1px solid #58A618;">Web application not available</h2>
+                Web application is not available on this network.<br />
+                                This request has been logged.<br /><br />
+                                For further information, you can always send an e-mail to  <a maillink href="mailto:support@pxl.be">support@pxl.be</a>.<br /><br />
+                                <a weblink href="http://www.pxl.be">Website PXL</a><br />
+                <br />
+            </div>
+            <div style="clear:both;"></div>
+        </div>
+    </body>
+</html>

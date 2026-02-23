@@ -85,6 +85,33 @@ def fetch_seminar_page(url: str) -> str | None:
         return None
 
 
+def check_register_page_available(register_url: str) -> bool:
+    """
+    Fetch the register page and return True if it looks available (proper event page, registration open).
+    Return False if the page is "Webapplicatie niet beschikbaar", "not available", or "Registraties gesloten".
+    """
+    try:
+        r = requests.get(
+            register_url,
+            headers={"User-Agent": USER_AGENT},
+            timeout=15,
+        )
+        r.raise_for_status()
+        html = r.text.lower()
+    except requests.RequestException as e:
+        log.debug("Register page fetch failed for %s: %s", register_url, e)
+        return False
+    # "Web application not available" / "Webapplicatie niet beschikbaar" (failed.html)
+    if "niet beschikbaar" in html or "not available" in html and "web application" in html:
+        log.info("Register page not available (blocked/unavailable): %s", register_url)
+        return False
+    # "Registraties zijn gesloten" / "Registraties gesloten" (registration closed)
+    if "registraties" in html and "gesloten" in html:
+        log.info("Register page shows registrations closed: %s", register_url)
+        return False
+    return True
+
+
 def parse_seminar_page(html: str, page_url: str) -> dict | None:
     """
     Parse seminar detail page. Returns dict with title, subtitle, register_url, and other
@@ -201,7 +228,11 @@ def build_discord_embed(seminar: dict) -> dict:
         "footer": {"text": "PXL-Digital Seminaries 2TIN"},
     }
     if seminar.get("register_url"):
-        embed["description"] = "**Inschrijven is open!** Klik op de titel om te registreren."
+        if seminar.get("register_available", True):
+            embed["description"] = "**Inschrijven is open!** Klik op de titel om te registreren."
+        else:
+            embed["description"] = "**Inschrijven-link gevonden, maar** de registratiepagina is niet beschikbaar of gesloten. Geen ping."
+            embed["color"] = 0xEDB90B  # orange/warning
     return embed
 
 
@@ -378,8 +409,21 @@ async def do_check(
 
     new_notifications = 0
     for sid, url, data in to_notify:
+        register_url = data.get("register_url")
+        if register_url:
+            # Check if the register page actually loads and is open (not "niet beschikbaar" or "gesloten")
+            is_available = await loop.run_in_executor(
+                None,
+                lambda u=register_url: check_register_page_available(u),
+            )
+            data = {**data, "register_available": is_available}
+            use_ping = ping if is_available else ""
+            if not is_available:
+                log.info("Posting to Discord without ping (register page unavailable/closed): %s", data.get("title", url))
+        else:
+            use_ping = ping
         log.info("Sending notification: %s", data.get("title", url))
-        if await _send_seminar_embed_async(channel, data, ping):
+        if await _send_seminar_embed_async(channel, data, use_ping):
             mark_notified(sid, seminar_url=url, title=data.get("title"))
             new_notifications += 1
             log.info("Notified: %s", data.get("title", url))
